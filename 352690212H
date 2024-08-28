@@ -1,0 +1,99 @@
+library(readr)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(openxlsx)
+library(zoo)
+
+# Definir o caminho do diretório e a lista de arquivos
+directory_path <- "C:/Users/Usuario/Downloads/352690212H"
+arquivos <- c('Jan15', 'Fev15', 'Mar15', 'Abr15', 'Mai15', 'Jun15', 'Jul15', 'Ago15', 'Set15', 'Out15', 'Nov15', 'Dez15',
+              'Jan16', 'Fev16', 'Mar16', 'Abr16', 'Mai16', 'Jun16', 'Jul16', 'Ago16',
+              'Set16', 'Out16', 'Nov16', 'Dez16', 'Jan17', 'Fev17', 'Mar17', 'Abr17',
+              'Mai17', 'Jun17', 'Jul17', 'Ago17', 'Set17', 'Out17', 'Nov17', 'Dez17',
+              'Jan18', 'Fev18', 'Ago23', 'Set23', 'Out23', 'Nov23', 'Dez23', 'Jan24',
+              'Fev24', 'Mar24', 'Mai24', 'Jun24')
+
+# Função para processar cada arquivo CSV
+processar_arquivo_csv <- function(nome_arquivo) {
+  # Caminho completo do arquivo
+  caminho_arquivo <- file.path(directory_path, paste0(nome_arquivo, ".csv"))
+  
+  # Ler o arquivo CSV, selecionando apenas as colunas necessárias
+  df <- read_delim(caminho_arquivo, delim = ';', locale = locale(decimal_mark = ','), col_types = cols(
+    datahora = col_character(),
+    sensor = col_character(),
+    valorMedida = col_double()
+  ))
+  
+  # Converter 'datahora' para datetime
+  df <- df %>%
+    mutate(datahora = ymd_hms(datahora, tz = "UTC")) %>%
+    select(datahora, sensor, valorMedida)  # Selecionar apenas as colunas necessárias
+  
+  # Verificar se o DataFrame contém dados válidos
+  if (nrow(df) == 0) {
+    stop("O DataFrame está vazio após filtrar por datahora. Verifique os dados.")
+  }
+  
+  # Separar dados de nível e chuva
+  df_nivel <- df %>% filter(sensor == "nível") %>% select(datahora, nivel = valorMedida)
+  df_chuva <- df %>% filter(sensor == "chuva") %>% select(datahora, chuva = valorMedida)
+  
+  # Salvar os dados de nível e chuva em abas separadas no Excel antes da interpolação
+  nome_excel_pre_interpolacao <- paste0("dados_pre_interpolacao_", nome_arquivo, ".xlsx")
+  write.xlsx(list("Nivel" = df_nivel, "Chuva" = df_chuva), file.path(directory_path, nome_excel_pre_interpolacao))
+  message(paste("Arquivo", nome_excel_pre_interpolacao, "salvo com sucesso antes da interpolação."))
+  
+  # Definir o início do intervalo como 00:00 do primeiro dia do mês
+  primeiro_dia_mes <- floor_date(min(df$datahora), "month")
+  ultimo_dia_mes <- ceiling_date(max(df$datahora), "month") - minutes(10)
+  
+  # Definir o intervalo de 10 em 10 minutos para o período do mês
+  intervalo <- seq(primeiro_dia_mes, ultimo_dia_mes, by = "10 min")
+  
+  # Criar data frame com todos os intervalos de tempo
+  df_completo <- data.frame(datahora = intervalo)
+  
+  # Encontrar os horários mais próximos múltiplos de 10 minutos para os dados de nível
+  df_nivel_ajustado <- df_nivel %>%
+    mutate(datahora = round_date(datahora, unit = "10 mins"))  # Arredonda para o múltiplo de 10 minutos mais próximo
+  
+  # Remover duplicatas após o arredondamento
+  df_nivel_ajustado <- df_nivel_ajustado %>%
+    distinct(datahora, .keep_all = TRUE)
+  
+  # Merge com os dados de nível ajustado
+  df_nivel_completo <- df_completo %>%
+    left_join(df_nivel_ajustado, by = "datahora") %>%
+    arrange(datahora)
+  
+  # Merge com os dados de chuva
+  df_chuva_completo <- df_completo %>%
+    left_join(df_chuva, by = "datahora") %>%
+    arrange(datahora)
+  
+  # Preenchimento de falhas para dados de nível e chuva
+  df_nivel_completo <- df_nivel_completo %>%
+    mutate(nivel = ifelse(is.na(nivel), zoo::na.approx(nivel, na.rm = FALSE), nivel))
+  
+  df_chuva_completo <- df_chuva_completo %>%
+    mutate(chuva = ifelse(is.na(chuva), 0, chuva))  # Preencher NA com 0 para chuva
+  
+  # Combinar dados de nível e chuva
+  df_combined <- df_nivel_completo %>%
+    left_join(df_chuva_completo, by = "datahora")
+  
+  # Verificar os dados combinados
+  print("Dados combinados após interpolação:")
+  print(head(df_combined))
+  
+  # Salvar os dados de nível e chuva interpolados em abas separadas no Excel
+  nome_excel <- paste0("dados_combined_interpolados_10min_", nome_arquivo, ".xlsx")
+  write.xlsx(list("Nivel" = df_nivel_completo, "Chuva" = df_chuva_completo), file.path(directory_path, nome_excel))
+  
+  message(paste("Arquivo", nome_excel, "salvo com sucesso após a interpolação."))
+}
+
+# Processar todos os arquivos na lista
+lapply(arquivos, processar_arquivo_csv)
